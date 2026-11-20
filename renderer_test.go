@@ -2,6 +2,8 @@ package md2slack
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -416,55 +418,101 @@ func TestConvert_NestedList(t *testing.T) {
 	if len(blocks) != 1 {
 		t.Fatalf("expected 1 block, got %d: %s", len(blocks), blockJSON(t, blocks))
 	}
-	rt, ok := blocks[0].(*slack.RichTextBlock)
-	if !ok {
-		t.Fatalf("expected RichTextBlock, got %T", blocks[0])
+	want := []string{
+		"0:Parent",
+		"1:Child A",
+		"1:Child B",
+		"0:Another parent",
 	}
-	// Should have the parent list and the nested list as sibling elements
-	// in the same RichTextBlock (not nested inside each other).
-	if len(rt.Elements) < 2 {
-		t.Fatalf("expected at least 2 elements (parent list + nested list), got %d: %s",
-			len(rt.Elements), blockJSON(t, blocks))
+	if got := listLines(t, blocks[0]); !reflect.DeepEqual(got, want) {
+		t.Errorf("list order mismatch\ngot:  %q\nwant: %q\n%s", got, want, blockJSON(t, blocks))
 	}
-	// The top-level list
-	list, ok := rt.Elements[0].(*slack.RichTextList)
-	if !ok {
-		t.Fatalf("expected RichTextList, got %T", rt.Elements[0])
+}
+
+// TestConvert_NestedListOrder verifies that nested lists render directly under
+// the item that contains them, not after the whole parent list.
+func TestConvert_NestedListOrder(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "nested lists under middle items",
+			input: "- A top\n- What drove:\n  - drove 1\n  - drove 2\n- Why bullish:\n  - bull 1\n- Caveat: text",
+			want:  []string{"0:A top", "0:What drove:", "1:drove 1", "1:drove 2", "0:Why bullish:", "1:bull 1", "0:Caveat: text"},
+		},
+		{
+			name:  "three levels",
+			input: "- L0 a\n  - L1 a\n    - L2 a\n  - L1 b\n- L0 b",
+			want:  []string{"0:L0 a", "1:L1 a", "2:L2 a", "1:L1 b", "0:L0 b"},
+		},
+		{
+			name:  "nested list as last item",
+			input: "- one\n- two\n  - two.a",
+			want:  []string{"0:one", "0:two", "1:two.a"},
+		},
 	}
-	if list.Style != slack.RTEListBullet {
-		t.Errorf("expected bullet style, got %q", list.Style)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blocks, err := Convert(tt.input)
+			if err != nil {
+				t.Fatalf("Convert error: %v", err)
+			}
+			if len(blocks) != 1 {
+				t.Fatalf("expected 1 block, got %d: %s", len(blocks), blockJSON(t, blocks))
+			}
+			if got := listLines(t, blocks[0]); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("list order mismatch\ngot:  %q\nwant: %q\n%s", got, tt.want, blockJSON(t, blocks))
+			}
+		})
 	}
-	if list.Indent != 0 {
-		t.Errorf("expected indent 0 for parent list, got %d", list.Indent)
+}
+
+// TestConvert_OrderedListOffsetAfterNested verifies that an ordered list split
+// by a nested list keeps counting via the offset field instead of restarting at 1.
+func TestConvert_OrderedListOffsetAfterNested(t *testing.T) {
+	blocks, err := Convert("1. first\n2. second\n   - sub\n3. third")
+	if err != nil {
+		t.Fatalf("Convert error: %v", err)
 	}
-	if len(list.Elements) != 2 {
-		t.Errorf("expected 2 items in parent list ('Parent' and 'Another parent'), got %d", len(list.Elements))
+	rt := blocks[0].(*slack.RichTextBlock)
+	if len(rt.Elements) != 3 {
+		t.Fatalf("expected 3 list segments, got %d: %s", len(rt.Elements), blockJSON(t, blocks))
 	}
-	// Verify parent list item text survived conversion.
-	// Goldmark splits text at spaces into multiple text nodes, so check
-	// individual words rather than multi-word phrases.
-	jsonStr := blockJSON(t, blocks)
-	for _, text := range []string{"Parent", "Another", "parent"} {
-		if !strings.Contains(jsonStr, text) {
-			t.Errorf("expected %q text in output: %s", text, jsonStr)
+	wantOffsets := []int{0, 0, 2}
+	for i, elem := range rt.Elements {
+		list := elem.(*slack.RichTextList)
+		if list.Offset != wantOffsets[i] {
+			t.Errorf("segment %d: expected offset %d, got %d", i, wantOffsets[i], list.Offset)
 		}
 	}
-	// The nested list should be a sibling element with indent 1
-	nestedList, ok := rt.Elements[1].(*slack.RichTextList)
+}
+
+// listLines flattens a RichTextBlock of lists into "indent:text" lines in render order.
+func listLines(t *testing.T, block slack.Block) []string {
+	t.Helper()
+	rt, ok := block.(*slack.RichTextBlock)
 	if !ok {
-		t.Fatalf("expected RichTextList for nested list, got %T", rt.Elements[1])
+		t.Fatalf("expected RichTextBlock, got %T", block)
 	}
-	if nestedList.Indent != 1 {
-		t.Errorf("expected indent 1 for nested list, got %d", nestedList.Indent)
-	}
-	if len(nestedList.Elements) != 2 {
-		t.Errorf("expected 2 items in nested list, got %d", len(nestedList.Elements))
-	}
-	for _, text := range []string{"Child", "A", "B"} {
-		if !strings.Contains(jsonStr, text) {
-			t.Errorf("expected %q text in output: %s", text, jsonStr)
+	var lines []string
+	for _, elem := range rt.Elements {
+		list, ok := elem.(*slack.RichTextList)
+		if !ok {
+			t.Fatalf("expected RichTextList, got %T", elem)
+		}
+		for _, item := range list.Elements {
+			var sb strings.Builder
+			for _, e := range item.(*slack.RichTextSection).Elements {
+				if te, ok := e.(*slack.RichTextSectionTextElement); ok {
+					sb.WriteString(te.Text)
+				}
+			}
+			lines = append(lines, fmt.Sprintf("%d:%s", list.Indent, sb.String()))
 		}
 	}
+	return lines
 }
 
 func TestConvert_ComplexDocument(t *testing.T) {
