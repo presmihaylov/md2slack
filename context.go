@@ -30,7 +30,6 @@ func isValidEmojiName(name string) bool {
 	return false
 }
 
-
 // renderContext tracks all state during the AST walk.
 type renderContext struct {
 	source []byte
@@ -54,7 +53,8 @@ type renderContext struct {
 	blockquoteStack []blockquoteFrame
 
 	// List state.
-	listStack []listFrame
+	listStack    []listFrame
+	listElements []slack.RichTextElement // flushed list segments of the current top-level list, in document order
 
 	// Table state.
 	inTable    bool
@@ -85,10 +85,10 @@ type renderContext struct {
 
 // listFrame tracks one level of list nesting.
 type listFrame struct {
-	style       slack.RichTextListElementType // RTEListOrdered or RTEListBullet
-	items       []slack.RichTextElement       // accumulated RichTextSection items
-	indent      int
-	nestedLists []slack.RichTextElement // nested lists collected from children, emitted as siblings
+	style  slack.RichTextListElementType // RTEListOrdered or RTEListBullet
+	items  []slack.RichTextElement       // accumulated RichTextSection items
+	indent int
+	offset int // items already flushed, so ordered lists keep counting after a nested list
 }
 
 // blockquoteFrame tracks one level of blockquote nesting.

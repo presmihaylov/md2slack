@@ -269,13 +269,14 @@ func (ctx *renderContext) handleList(n *ast.List, entering bool) {
 
 		// Before pushing a nested list, flush the current list item's
 		// inline elements so they are not destroyed by the nested list's
-		// handleListItem entering calls.
-		if indent > 0 && len(ctx.inlineElements) > 0 {
-			sec := ctx.flushInlineToSection()
-			if sec != nil {
-				frame := &ctx.listStack[len(ctx.listStack)-1]
+		// handleListItem entering calls. Then flush the parent's items so far,
+		// so the nested list renders right after the item that contains it.
+		if indent > 0 {
+			frame := &ctx.listStack[len(ctx.listStack)-1]
+			if sec := ctx.flushInlineToSection(); sec != nil {
 				frame.items = append(frame.items, sec)
 			}
+			ctx.flushListFrame(frame)
 		}
 
 		ctx.listStack = append(ctx.listStack, listFrame{
@@ -286,33 +287,32 @@ func (ctx *renderContext) handleList(n *ast.List, entering bool) {
 		if len(ctx.listStack) == 0 {
 			return
 		}
-		frame := ctx.listStack[len(ctx.listStack)-1]
+		ctx.flushListFrame(&ctx.listStack[len(ctx.listStack)-1])
 		ctx.listStack = ctx.listStack[:len(ctx.listStack)-1]
 
 		if len(ctx.listStack) == 0 {
-			// Top-level list: emit as a RichTextBlock.
-			// Collect the list itself (if non-empty) plus any nested lists
-			// as sibling elements in the same RichTextBlock.
-			var elements []slack.RichTextElement
-			if len(frame.items) > 0 {
-				elements = append(elements, slack.NewRichTextList(frame.style, frame.indent, frame.items...))
+			// Top-level list: emit all segments as sibling elements of one
+			// RichTextBlock (Slack rejects rich_text_list nested inside
+			// rich_text_list, so nesting is expressed via indent only).
+			if len(ctx.listElements) > 0 {
+				ctx.emitBlock(slack.NewRichTextBlock("", ctx.listElements...))
 			}
-			elements = append(elements, frame.nestedLists...)
-			if len(elements) > 0 {
-				ctx.emitBlock(slack.NewRichTextBlock("", elements...))
-			}
-		} else {
-			// Nested list: store in parent frame's nestedLists rather than
-			// embedding as a child element (Slack rejects nested rich_text_list
-			// inside rich_text_list elements). Also propagate any deeply
-			// nested lists upward to maintain sibling ordering.
-			parentFrame := &ctx.listStack[len(ctx.listStack)-1]
-			if len(frame.items) > 0 {
-				parentFrame.nestedLists = append(parentFrame.nestedLists, slack.NewRichTextList(frame.style, frame.indent, frame.items...))
-			}
-			parentFrame.nestedLists = append(parentFrame.nestedLists, frame.nestedLists...)
+			ctx.listElements = nil
 		}
 	}
+}
+
+// flushListFrame moves a list frame's accumulated items into listElements as
+// one RichTextList segment, preserving document order across nesting levels.
+func (ctx *renderContext) flushListFrame(frame *listFrame) {
+	if len(frame.items) == 0 {
+		return
+	}
+	list := slack.NewRichTextList(frame.style, frame.indent, frame.items...)
+	list.Offset = frame.offset
+	ctx.listElements = append(ctx.listElements, list)
+	frame.offset += len(frame.items)
+	frame.items = nil
 }
 
 // handleListItem processes an ast.ListItem node.
